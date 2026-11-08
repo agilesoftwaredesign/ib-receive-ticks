@@ -1,0 +1,38 @@
+# Instruments are processed one after another, in the order listed.
+connection:
+  host: 127.0.0.1
+  port: 7496
+  # client_id: 4711        # random (2000-10000) if not set
+
+settings:
+  timezone: Europe/Berlin  # timezone of the stored wall-clock timestamps ts_no_tz
+  pace: 10                 # seconds between IB requests (IB allows 60 historical requests per 10 min)
+  data: data               # root directory for the per-contract SQLite files
+  what_to_show: TRADES     # TRADES, MIDPOINT, BID, ASK, ...
+  all_hours: false         # include data outside regular trading hours
+
+instruments:
+  - symbol: AAPL
+    skip: false
+    sec_type: STK          # default; exchange defaults to SMART, currency to USD
+
+  - symbol: DAX
+    skip: false
+    sec_type: FUT
+    exchange: EUREX
+    currency: EUR
+    trading_class: FDAX    # DAX has FDAX, FDXM (mini) and FDXS
+    # expiry: 202612       # contract month YYYYMM; front month if not set
+    # name: FDAX           # folder/file symbol if it differs from the IB symbol
+    # what_to_show / all_hours can be overridden per instrument as well
+
+  - symbol: FDXM
+    skip: false
+    sec_type: FUT
+    exchange: EUREX
+    currency: EUR
+    trading_class: FDXM    # DAX has FDAX, FDXM (mini) and FDXS
+    name: FDXM
+    # expiry: 202609       # contract month YYYYMM; front month if not set
+    # name: FDXM           # folder/file symbol if it differs from the IB symbol
+    # what_to_show / all_hours can be overridden per instrument as well
