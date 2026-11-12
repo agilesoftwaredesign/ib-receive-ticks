@@ -1,4 +1,5 @@
 import argparse
+import logging
 import random
 import sys
 import time
@@ -12,10 +13,13 @@ from store import default_out_path, from_epoch, last_ts, write_bars
 
 # https://github.com/ib-api-reloaded/ib_async
 
+log = logging.getLogger("ib-receive-ticks")
+
 
 CHUNK_SECONDS = 1800  # IB allows at most 1800 S of 1-second bars per request
 DEFAULT_UPDATE_EVERY_MIN = 15
 DEFAULT_WAIT_TO_RECONNECT_MIN = 5
+DEFAULT_LOG_FILE = "ib-receive-ticks.log"
 MIN_SECONDS = 60  # IB rejects very short durations (error 321); a longer one only overlaps stored bars
 
 
@@ -63,6 +67,18 @@ def parse_args():
         type=float,
         help="Update mode only: minutes to wait before reconnecting after the connection to IB was lost "
         f"(default: {DEFAULT_WAIT_TO_RECONNECT_MIN}). With --only-new-instrument a lost connection ends the script",
+    )
+    p.add_argument(
+        "--log-file",
+        default=DEFAULT_LOG_FILE,
+        help=f"Log file, appended to (default: {DEFAULT_LOG_FILE}); an empty value disables file logging",
+    )
+    p.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        type=str.upper,
+        help="Log level (default: INFO)",
     )
     args = p.parse_args()
     if args.wait_to_reconnect is not None and args.only_new_instrument:
@@ -200,7 +216,7 @@ def fetch_instrument(
     expiry = (
         contract.lastTradeDateOrContractMonth[:6] if contract.secType == "FUT" else None
     )
-    print(
+    log.info(
         f"{contract.secType} {contract.symbol} {contract.tradingClass} {expiry or ''} -> conId {contract.conId} "
         f"({contract.primaryExchange or contract.exchange}, {contract.currency})"
     )
@@ -232,7 +248,7 @@ def fetch_instrument(
     since = None
     if days is None:
         if done_until is None:
-            print(
+            log.info(
                 f"Skipped: no data for {series} in {out} yet; load it with --only-new-instrument --days N"
             )
             return False
@@ -242,11 +258,11 @@ def fetch_instrument(
         days = (
             now.astimezone(exchange_tz).date() - since.astimezone(exchange_tz).date()
         ).days + 1
-        print(
+        log.info(
             f"Updating from {since.astimezone(tz):%Y-%m-%d %H:%M:%S} ({cfg.settings.timezone}) to now (db-file: {out})"
         )
     elif done_until is not None:
-        print(
+        log.info(
             f"Skipped: {series} already has data in {out} (newest "
             f"{done_until.astimezone(tz):%Y-%m-%d %H:%M:%S}); run without options to update it"
         )
@@ -259,7 +275,7 @@ def fetch_instrument(
         for w in windows
         if done_until is None or w[1] - timedelta(seconds=1) > done_until
     ]
-    print(
+    log.info(
         f"{len(windows)} request windows of up to {CHUNK_SECONDS} s, {len(windows) - len(todo)} already stored, "
         f"{len(todo)} to fetch (~{len(todo) * cfg.settings.pace / 60:.0f} min)"
     )
@@ -286,11 +302,11 @@ def fetch_instrument(
             contract.conId,
             tz,
         )
-        print(
+        log.info(
             f"[{i}/{len(todo)}] {start.astimezone(tz):%Y-%m-%d %H:%M} -> {end.astimezone(tz):%H:%M}: "
             f"{len(bars)} bars"
         )
-    print(f"Done: {out} (source {series}, timestamps in {cfg.settings.timezone})")
+    log.info(f"Done: {out} (source {series}, timestamps in {cfg.settings.timezone})")
     return True
 
 
@@ -298,27 +314,41 @@ def run_once(ib: IB, cfg: Config, pacer: Pacer, days: int | None) -> int:
     """Process every configured instrument once. Returns the number of failed instruments."""
     done, skipped, failed = 0, 0, 0
     for inst in cfg.instruments:  # in sequence, one after the other
-        print(f"\n=== {inst.symbol} ===")
+        log.info(f"=== {inst.symbol} ===")
         if inst.skip:
-            print("-- skip --")
+            log.info("-- skip --")
         try:
             if (not inst.skip) and fetch_instrument(ib, inst, cfg, pacer, days):
                 done += 1
             else:
                 skipped += 1
         except ValueError as e:
-            print(f"{inst.symbol}: {e}", file=sys.stderr)
+            log.error(f"{inst.symbol}: {e}")
             failed += 1
-    print(f"\n{done} instrument(s) loaded, {skipped} skipped, {failed} failed")
+    log.info(f"{done} instrument(s) loaded, {skipped} skipped, {failed} failed")
     return failed
+
+
+def setup_logging(level: str, log_file: str | None) -> None:
+    """Log to the console and optionally a file; ib_async's own records go to the file only."""
+    fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(message)s")
+    console = logging.StreamHandler()  # stderr
+    console.addFilter(lambda r: not r.name.startswith("ib_async"))
+    handlers = [console]
+    if log_file:
+        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+    for h in handlers:
+        h.setFormatter(fmt)
+    logging.basicConfig(level=level, handlers=handlers)
 
 
 def main() -> int:
     args = parse_args()
+    setup_logging(args.log_level, args.log_file)
     try:
         cfg = load_config(args.config)
     except ValueError as e:
-        print(f"Config error: {e}", file=sys.stderr)
+        log.error(f"Config error: {e}")
         return 1
     host = args.host or cfg.connection.host
     port = args.port or cfg.connection.port
@@ -330,16 +360,16 @@ def main() -> int:
     # IB reports request errors only via this event; without it they are silent
     # 2100-2199 are informational status messages (data farm connection OK etc.)
     ib.errorEvent += lambda reqId, code, msg, contract: (
-        None
+        log.debug(f"IB info {code}: {msg}")
         if 2100 <= code < 2200
-        else print(f"IB error {code} (reqId {reqId}): {msg}", file=sys.stderr)
+        else log.warning(f"IB error {code} (reqId {reqId}): {msg}")
     )
 
-    print(f"Connecting to {host}:{port} (client-id {client_id}) ...")
+    log.info(f"Connecting to {host}:{port} (client-id {client_id}) ...")
     try:
         ib.connect(host, port, clientId=client_id)
     except Exception as e:  # noqa: BLE001
-        print(f"Connection failed: {e}", file=sys.stderr)
+        log.error(f"Connection failed: {e}")
         return 1
 
     try:
@@ -350,13 +380,13 @@ def main() -> int:
             try:
                 update_loop(ib, cfg, args.update_every_min)
             except ConnectionError as e:
-                print(f"Connection lost: {e}", file=sys.stderr)
+                log.warning(f"Connection lost: {e}")
                 reconnect(ib, host, port, client_id, args.wait_to_reconnect)
     except ConnectionError as e:  # only reached in --only-new-instrument mode: no reconnect, just exit
-        print(f"Connection lost: {e}", file=sys.stderr)
+        log.warning(f"Connection lost: {e}")
         return 1
     except KeyboardInterrupt:
-        print("\nStopped")
+        log.info("Stopped")
         return 0
     finally:
         ib.disconnect()
@@ -370,23 +400,23 @@ def update_loop(ib: IB, cfg: Config, every_min: float) -> None:
         if not ib.isConnected():
             raise ConnectionError("not connected to IB")
         run_once(ib, cfg, pacer, None)
-        print(f"Next update in {every_min:g} min (Ctrl-C to stop)")
+        log.info(f"Next update in {every_min:g} min (Ctrl-C to stop)")
         ib.sleep(every_min * 60)  # keeps the IB connection serviced while waiting
 
 
 def reconnect(ib: IB, host: str, port: int, client_id: int, wait_min: float) -> None:
     """Block until the connection to IB is re-established, retrying every `wait_min` minutes."""
     while True:
-        print(f"Reconnecting in {wait_min:g} min (Ctrl-C to stop)")
+        log.info(f"Reconnecting in {wait_min:g} min (Ctrl-C to stop)")
         ib.disconnect()  # drop the dead socket so connect() starts clean
         time.sleep(wait_min * 60)
-        print(f"Connecting to {host}:{port} (client-id {client_id}) ...")
+        log.info(f"Connecting to {host}:{port} (client-id {client_id}) ...")
         try:
             ib.connect(host, port, clientId=client_id)
-            print("Reconnected")
+            log.info("Reconnected")
             return
         except Exception as e:  # noqa: BLE001
-            print(f"Reconnect failed: {e}", file=sys.stderr)
+            log.error(f"Reconnect failed: {e}")
 
 
 if __name__ == "__main__":

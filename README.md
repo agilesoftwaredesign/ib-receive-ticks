@@ -19,6 +19,7 @@ python main.py --config other.yaml --port 4001 --client-id 42
 | `--only-new-instrument --days N` | load only the listed instruments that have no data yet, the last N days; existing ones are left alone |
 | `--config FILE` | YAML file (default `config.yaml`) |
 | `--wait-to-reconnect MIN` | update mode only: minutes to wait before reconnecting after a lost IB connection (default 5); with `--only-new-instrument` a lost connection just exits with code 1 |
+| `--log-file FILE`, `--log-level LEVEL` | log to stderr with timestamps, also appended to FILE (default `ib-receive-ticks.log`, `--log-file ""` disables it); `ib_async`'s own log records go to FILE only, not to the console (level DEBUG/INFO/WARNING/ERROR, default INFO) |
 | `--host`, `--port`, `--client-id` | override `connection:` of the YAML (defaults: 127.0.0.1, 7496, random 2000-10000) |
 
 `--days` is only valid with `--only-new-instrument`, and `--only-new-instrument` requires `--days`.
