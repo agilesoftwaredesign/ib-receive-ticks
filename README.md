@@ -24,6 +24,45 @@ python main.py --config other.yaml --port 4001 --client-id 42
 
 `--days` is only valid with `--only-new-instrument`, and `--only-new-instrument` requires `--days`.
 
+## Setup for Windows
+
+The quick start above uses macOS/Linux commands; on Windows only the following differs.
+
+1. **Prerequisites**: Python 3.9+ (`zoneinfo` is required) and TWS or IB Gateway for Windows, running and logged in.
+2. **Enable the API** in TWS/Gateway under *Configure → Settings → API → Settings*: tick **Enable ActiveX and Socket
+   Clients**, keep `127.0.0.1` in the trusted IPs, and make the socket port match `connection.port` in the YAML or
+   `--port`. The default is `7496` (TWS live); the usual others are `7497` (TWS paper), `4001` (Gateway live) and
+   `4002` (Gateway paper).
+3. **Create the environment** (PowerShell; in `cmd.exe` use `venv\Scripts\activate.bat`):
+
+   ```powershell
+   python -m venv venv
+   venv\Scripts\Activate.ps1
+   pip install -r requirements.txt
+   ```
+
+   `requirements.txt` installs `tzdata` automatically on Windows, which has no system timezone database; without it
+   `ZoneInfo("Europe/Berlin")` fails with `ZoneInfoNotFoundError`. If PowerShell blocks the activation script, run
+   `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
+4. **Configure and run** (`python` instead of `python3`, or `py -3`):
+
+   ```powershell
+   copy config.yaml.example config.yaml
+   python main.py --only-new-instrument --days 7    # initial load
+   python main.py                                   # later updates
+   ```
+
+Notes:
+
+- `settings.data` and the default log file `ib-receive-ticks.log` are relative to the current directory, so run from
+  the repository folder or set an absolute path such as `D:/ticks` (forward slashes are fine in YAML).
+- Keep the data directory on a local disk, not on a network share or a synced folder such as OneDrive: SQLite WAL
+  does not work reliably there (see [Concurrent access](#concurrent-access)).
+- For scheduled updates, create a Task Scheduler task that runs `venv\Scripts\python.exe main.py` with the repository
+  as the start directory. TWS/Gateway log out on a daily schedule; `--wait-to-reconnect` only covers lost
+  connections, not a logged-out session.
+- No IB credentials belong in the YAML; the script only uses the local socket connection.
+
 ## config.yaml
 
 See `config.yaml` for the commented example: `connection`, `settings` (timezone, pace, data directory,
