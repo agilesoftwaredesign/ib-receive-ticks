@@ -1,6 +1,7 @@
 import argparse
 import random
 import sys
+import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -14,6 +15,7 @@ from store import default_out_path, from_epoch, last_ts, write_bars
 
 CHUNK_SECONDS = 1800  # IB allows at most 1800 S of 1-second bars per request
 DEFAULT_UPDATE_EVERY_MIN = 15
+DEFAULT_WAIT_TO_RECONNECT_MIN = 5
 MIN_SECONDS = 60  # IB rejects very short durations (error 321); a longer one only overlaps stored bars
 
 
@@ -56,7 +58,21 @@ def parse_args():
         help="Update mode only: minutes to wait after an update before the next one; repeats until the "
         f"script is terminated (default: {DEFAULT_UPDATE_EVERY_MIN})",
     )
+    p.add_argument(
+        "--wait-to-reconnect",
+        type=float,
+        help="Update mode only: minutes to wait before reconnecting after the connection to IB was lost "
+        f"(default: {DEFAULT_WAIT_TO_RECONNECT_MIN}). With --only-new-instrument a lost connection ends the script",
+    )
     args = p.parse_args()
+    if args.wait_to_reconnect is not None and args.only_new_instrument:
+        p.error(
+            "--wait-to-reconnect can only be used in update mode, not with --only-new-instrument"
+        )
+    if args.wait_to_reconnect is not None and args.wait_to_reconnect < 0:
+        p.error("--wait-to-reconnect must not be negative")
+    if args.wait_to_reconnect is None:
+        args.wait_to_reconnect = DEFAULT_WAIT_TO_RECONNECT_MIN
     if args.update_every_min is not None and args.only_new_instrument:
         p.error(
             "--update-every-min can only be used in update mode, not with --only-new-instrument"
@@ -327,20 +343,50 @@ def main() -> int:
         return 1
 
     try:
-        pacer = Pacer(ib, cfg.settings.pace)
         if args.only_new_instrument:
-            return 1 if run_once(ib, cfg, pacer, args.days) else 0
-        while True:  # update mode: repeat until terminated
-            run_once(ib, cfg, pacer, None)
-            print(f"Next update in {args.update_every_min:g} min (Ctrl-C to stop)")
-            ib.sleep(
-                args.update_every_min * 60
-            )  # keeps the IB connection serviced while waiting
+            # a lost connection raises ConnectionError, which ends the script (handler below)
+            return 1 if run_once(ib, cfg, Pacer(ib, cfg.settings.pace), args.days) else 0
+        while True:  # update mode: repeat until terminated, reconnecting when the connection is lost
+            try:
+                update_loop(ib, cfg, args.update_every_min)
+            except ConnectionError as e:
+                print(f"Connection lost: {e}", file=sys.stderr)
+                reconnect(ib, host, port, client_id, args.wait_to_reconnect)
+    except ConnectionError as e:  # only reached in --only-new-instrument mode: no reconnect, just exit
+        print(f"Connection lost: {e}", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         print("\nStopped")
         return 0
     finally:
         ib.disconnect()
+
+
+def update_loop(ib: IB, cfg: Config, every_min: float) -> None:
+    """Update all instruments repeatedly; returns only by raising (ConnectionError if the connection is lost)."""
+    pacer = Pacer(ib, cfg.settings.pace)
+    while True:
+        # a drop while idle in ib.sleep() does not raise by itself, so check before every run
+        if not ib.isConnected():
+            raise ConnectionError("not connected to IB")
+        run_once(ib, cfg, pacer, None)
+        print(f"Next update in {every_min:g} min (Ctrl-C to stop)")
+        ib.sleep(every_min * 60)  # keeps the IB connection serviced while waiting
+
+
+def reconnect(ib: IB, host: str, port: int, client_id: int, wait_min: float) -> None:
+    """Block until the connection to IB is re-established, retrying every `wait_min` minutes."""
+    while True:
+        print(f"Reconnecting in {wait_min:g} min (Ctrl-C to stop)")
+        ib.disconnect()  # drop the dead socket so connect() starts clean
+        time.sleep(wait_min * 60)
+        print(f"Connecting to {host}:{port} (client-id {client_id}) ...")
+        try:
+            ib.connect(host, port, clientId=client_id)
+            print("Reconnected")
+            return
+        except Exception as e:  # noqa: BLE001
+            print(f"Reconnect failed: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":
