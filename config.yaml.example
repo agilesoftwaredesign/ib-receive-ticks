@@ -11,6 +11,23 @@ settings:
   what_to_show: TRADES     # TRADES, MIDPOINT, BID, ASK, ...
   all_hours: false         # include data outside regular trading hours
 
+# TWS-is-up check (optional, update mode only): sends an e-mail ONCE per outage if the connection to
+# TWS / IB Gateway has been down for `down_after_min` minutes, and EVERY DAY at `daily_check_time` while it is
+# still down. The long-outage e-mail is re-armed after the connection has been re-established.
+# Remove the whole section to disable the check.
+alerts:
+  down_after_min: 30         # minutes
+  daily_check_time: "01:00"  # HH:MM in settings.timezone; keep the quotes (YAML reads a bare 1:00 as a number)
+  smtp:
+    host: smtp.example.com
+    port: 587                # 587 with starttls, 465 with ssl
+    security: starttls       # starttls, ssl or none
+    user: ticks@example.com  # no login if not set
+    # password: ...          # better: environment variable IB_RECEIVE_TICKS_SMTP_PASSWORD (takes precedence)
+  email_from: ticks@example.com
+  email_to: you@example.com  # one address or a list
+  email_subject: "IB receive ticks: TWS is down"
+
 instruments:
   - symbol: AAPL
     skip: false

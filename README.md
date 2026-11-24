@@ -74,6 +74,29 @@ folder/file symbol, e.g. `FDXM` for the mini DAX (see [Folder structure](#folder
 Futures use the front month unless `expiry: YYYYMM` is set; an update keeps following the front month, so pin
 `expiry` to keep updating an older contract after a roll.
 
+## TWS-is-up check (e-mail alerts)
+
+The optional `alerts:` section of `config.yaml` (see `config.yaml.example`) sends an e-mail when TWS / IB Gateway is
+unreachable. It only applies to update mode (the script reconnects there); a failed *first* connection at start-up
+just exits with an error. While the connection is down the check runs every 10 s.
+
+| alert | sent when | sent |
+|---|---|---|
+| long outage | the connection has been down for `down_after_min` minutes (default 30) | once per outage |
+| daily check | the connection is down at `daily_check_time` (default `"01:00"`, in `settings.timezone`) | every day at that time while the outage lasts |
+
+The long-outage alert is re-armed only when the connection has been re-established. An outage of three days
+therefore produces the long-outage e-mail plus one daily e-mail per night (01:00 on each of the three days, if it
+began in the evening before the first). Sending is best effort: a failing SMTP server is logged
+and not retried, and never interrupts the download.
+
+- `smtp`: `host` (required), `port` (587), `security` (`starttls` default, `ssl` or `none`), `user` (no login if unset)
+  and `password`. The environment variable `IB_RECEIVE_TICKS_SMTP_PASSWORD` takes precedence over `password`, so the
+  password does not have to be stored in the file.
+- `email_from` and `email_to` (one address or a list) are required; `email_subject` is optional.
+- Quote `daily_check_time`: YAML reads a bare `1:00` as the number 60.
+- `config.yaml` is git-ignored; keep SMTP passwords out of `config.yaml.example`.
+
 ## Multiple trading classes
 
 A single IB symbol can carry several trading classes; EUREX `DAX` has `FDAX` (standard), `FDXM` (mini) and

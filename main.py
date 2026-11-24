@@ -7,6 +7,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from alert import DownMonitor, build_message, send_email
 from config import Config, Instrument, load_config
 from ib_async import IB, ContractDetails, Future, Stock
 from store import default_out_path, from_epoch, last_ts, write_bars
@@ -20,6 +21,7 @@ CHUNK_SECONDS = 1800  # IB allows at most 1800 S of 1-second bars per request
 DEFAULT_UPDATE_EVERY_MIN = 15
 DEFAULT_WAIT_TO_RECONNECT_MIN = 5
 DEFAULT_LOG_FILE = "ib-receive-ticks.log"
+CHECK_SECONDS = 10  # how often the connection is checked while waiting (TWS-is-up check)
 MIN_SECONDS = 60  # IB rejects very short durations (error 321); a longer one only overlaps stored bars
 
 
@@ -356,6 +358,7 @@ def main() -> int:
         args.client_id or cfg.connection.client_id or random.randint(2_000, 10_000)
     )
 
+    tick = make_monitor(cfg, host, port, args.wait_to_reconnect)
     ib = IB()
     # IB reports request errors only via this event; without it they are silent
     # 2100-2199 are informational status messages (data farm connection OK etc.)
@@ -378,10 +381,11 @@ def main() -> int:
             return 1 if run_once(ib, cfg, Pacer(ib, cfg.settings.pace), args.days) else 0
         while True:  # update mode: repeat until terminated, reconnecting when the connection is lost
             try:
-                update_loop(ib, cfg, args.update_every_min)
+                update_loop(ib, cfg, args.update_every_min, tick)
             except ConnectionError as e:
                 log.warning(f"Connection lost: {e}")
-                reconnect(ib, host, port, client_id, args.wait_to_reconnect)
+                tick(False)
+                reconnect(ib, host, port, client_id, args.wait_to_reconnect, tick)
     except ConnectionError as e:  # only reached in --only-new-instrument mode: no reconnect, just exit
         log.warning(f"Connection lost: {e}")
         return 1
@@ -392,31 +396,65 @@ def main() -> int:
         ib.disconnect()
 
 
-def update_loop(ib: IB, cfg: Config, every_min: float) -> None:
+def _no_tick(connected: bool) -> None:
+    """Stand-in for the TWS-is-up check when no `alerts:` section is configured."""
+
+
+def make_monitor(cfg: Config, host: str, port: int, retry_min: float):
+    """Return the `tick(connected)` function of the TWS-is-up check (a no-op without `alerts:`)."""
+    if cfg.alerts is None:
+        return _no_tick
+    alerts, tz = cfg.alerts, ZoneInfo(cfg.settings.timezone)
+
+    def send(kind, down_since, now):
+        send_email(
+            alerts,
+            build_message(alerts, kind, host, port, down_since, now, tz, retry_min),
+        )
+
+    return DownMonitor(alerts, tz, send).tick
+
+
+def update_loop(ib: IB, cfg: Config, every_min: float, tick=_no_tick) -> None:
     """Update all instruments repeatedly; returns only by raising (ConnectionError if the connection is lost)."""
     pacer = Pacer(ib, cfg.settings.pace)
     while True:
         # a drop while idle in ib.sleep() does not raise by itself, so check before every run
-        if not ib.isConnected():
+        connected = ib.isConnected()
+        tick(connected)
+        if not connected:
             raise ConnectionError("not connected to IB")
         run_once(ib, cfg, pacer, None)
         log.info(f"Next update in {every_min:g} min (Ctrl-C to stop)")
-        ib.sleep(every_min * 60)  # keeps the IB connection serviced while waiting
+        deadline = time.monotonic() + every_min * 60
+        while (left := deadline - time.monotonic()) > 0:
+            ib.sleep(min(CHECK_SECONDS, left))  # keeps the IB connection serviced while waiting
+            connected = ib.isConnected()
+            tick(connected)
+            if not connected:
+                raise ConnectionError("connection lost while waiting for the next update")
 
 
-def reconnect(ib: IB, host: str, port: int, client_id: int, wait_min: float) -> None:
+def reconnect(
+    ib: IB, host: str, port: int, client_id: int, wait_min: float, tick=_no_tick
+) -> None:
     """Block until the connection to IB is re-established, retrying every `wait_min` minutes."""
     while True:
         log.info(f"Reconnecting in {wait_min:g} min (Ctrl-C to stop)")
         ib.disconnect()  # drop the dead socket so connect() starts clean
-        time.sleep(wait_min * 60)
+        deadline = time.monotonic() + wait_min * 60
+        while (left := deadline - time.monotonic()) > 0:
+            tick(False)
+            time.sleep(min(CHECK_SECONDS, left))
         log.info(f"Connecting to {host}:{port} (client-id {client_id}) ...")
         try:
             ib.connect(host, port, clientId=client_id)
             log.info("Reconnected")
+            tick(True)
             return
         except Exception as e:  # noqa: BLE001
             log.error(f"Reconnect failed: {e}")
+            tick(False)
 
 
 if __name__ == "__main__":

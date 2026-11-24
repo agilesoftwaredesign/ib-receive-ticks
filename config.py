@@ -1,9 +1,13 @@
 """YAML configuration of ib-receive-ticks (see config.yaml)."""
 
+import os
 from dataclasses import dataclass, field, fields
+from datetime import datetime, time
 from pathlib import Path
 
 import yaml
+
+ENV_SMTP_PASSWORD = "IB_RECEIVE_TICKS_SMTP_PASSWORD"
 
 
 @dataclass
@@ -45,10 +49,30 @@ class Instrument:
 
 
 @dataclass
+class Smtp:
+    host: str = ""
+    port: int = 587
+    user: str | None = None  # no login if not set
+    password: str | None = None  # the environment variable ENV_SMTP_PASSWORD takes precedence
+    security: str = "starttls"  # starttls, ssl or none
+
+
+@dataclass
+class Alerts:
+    smtp: Smtp = field(default_factory=Smtp)
+    email_to: list[str] = field(default_factory=list)  # one address or a list
+    email_from: str = ""
+    email_subject: str = "IB receive ticks: TWS is down"
+    down_after_min: float = 30  # alert once if the connection is down this long
+    daily_check_time: time = time(1, 0)  # alert once if still down then, HH:MM in settings.timezone
+
+
+@dataclass
 class Config:
     connection: Connection = field(default_factory=Connection)
     settings: Settings = field(default_factory=Settings)
     instruments: list[Instrument] = field(default_factory=list)
+    alerts: Alerts | None = None  # no TWS-is-up check if the section is missing
 
 
 def _build(cls, raw, where: str, **defaults):
@@ -63,13 +87,60 @@ def _build(cls, raw, where: str, **defaults):
     return cls(**{**defaults, **raw})
 
 
+def _load_alerts(raw) -> Alerts:
+    """Build and validate the `alerts:` section; the SMTP password may come from the environment."""
+    if raw is not None and not isinstance(raw, dict):
+        raise ValueError(f"alerts: expected a mapping, got {type(raw).__name__}")
+    raw = dict(raw or {})
+    smtp = _build(Smtp, raw.pop("smtp", None), "alerts.smtp")
+    alerts = _build(Alerts, raw, "alerts", smtp=smtp)
+    if not smtp.host:
+        raise ValueError("alerts.smtp.host is required")
+    smtp.password = os.environ.get(ENV_SMTP_PASSWORD) or smtp.password
+    if smtp.user and not smtp.password:
+        raise ValueError(
+            f"alerts.smtp: user is set but no password (set smtp.password or the environment variable {ENV_SMTP_PASSWORD})"
+        )
+    if smtp.security not in ("starttls", "ssl", "none"):
+        raise ValueError(
+            f"alerts.smtp.security must be starttls, ssl or none, not {smtp.security!r}"
+        )
+    if isinstance(alerts.email_to, str):
+        alerts.email_to = [alerts.email_to]
+    if not alerts.email_to or not all(
+        isinstance(a, str) and a for a in alerts.email_to
+    ):
+        raise ValueError("alerts.email_to is required (an address or a list of them)")
+    if not alerts.email_from:
+        raise ValueError("alerts.email_from is required")
+    if (
+        isinstance(alerts.down_after_min, bool)
+        or not isinstance(alerts.down_after_min, (int, float))
+        or alerts.down_after_min <= 0
+    ):
+        raise ValueError("alerts.down_after_min must be a positive number of minutes")
+    if isinstance(alerts.daily_check_time, str):
+        try:
+            alerts.daily_check_time = datetime.strptime(
+                alerts.daily_check_time, "%H:%M"
+            ).time()
+        except ValueError:
+            raise ValueError(
+                f"alerts.daily_check_time must be HH:MM, not {alerts.daily_check_time!r}"
+            ) from None
+    elif not isinstance(alerts.daily_check_time, time):
+        # an unquoted 1:00 is read by YAML as a number (sexagesimal), so the time has to be quoted
+        raise ValueError('alerts.daily_check_time must be a quoted HH:MM string, e.g. "01:00"')
+    return alerts
+
+
 def load_config(path) -> Config:
     """Read and validate the YAML file at `path`; raises ValueError with a readable message."""
     path = Path(path)
     if not path.exists():
         raise ValueError(f"config file {path} not found")
     raw = yaml.safe_load(path.read_text()) or {}
-    unknown = set(raw) - {"connection", "settings", "instruments"}
+    unknown = set(raw) - {"connection", "settings", "instruments", "alerts"}
     if unknown:
         raise ValueError(
             f"{path}: unknown top-level key(s): {', '.join(sorted(unknown))}"
@@ -103,5 +174,8 @@ def load_config(path) -> Config:
     if not instruments:
         raise ValueError(f"{path}: no instruments listed")
     return Config(
-        _build(Connection, raw.get("connection"), "connection"), settings, instruments
+        _build(Connection, raw.get("connection"), "connection"),
+        settings,
+        instruments,
+        _load_alerts(raw["alerts"]) if "alerts" in raw else None,
     )
