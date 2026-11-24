@@ -1,0 +1,26 @@
+# Normalize line endings: let Git detect text files and store them as LF in the repo.
+* text=auto
+
+# Source and config files: always LF in the working tree, on every platform.
+*.py    text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.example text eol=lf
+.gitignore     text eol=lf
+.gitattributes text eol=lf
+
+# Windows-only scripts need CRLF to run correctly.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files: never touch.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.db  binary
+*.sqlite binary
+*.parquet binary
